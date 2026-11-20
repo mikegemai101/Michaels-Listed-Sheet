@@ -200,6 +200,13 @@ main:has(.sheetpage) { max-width: none; padding-top: 14px; padding-bottom: 20px;
 .gc.rn.s { background: var(--brand); color: var(--brand-ink); }
 .gc.a { outline: 2px solid var(--brand); outline-offset: -2px; background: var(--panel); z-index: 4; }
 .gc.pin.a { z-index: 5; }              /* a selected cell scrolls UNDER the frozen columns, never over them */
+/* Ctrl+F: every cell that contains the text has a yellow frame, the one we are on an orange one */
+.gc.fnd { outline: 2px solid #f2b600; outline-offset: -2px; }
+.gc.fndcur, .gc.a.fndcur { outline: 3px solid #ff7a00; outline-offset: -3px; z-index: 4; }
+.findbar { position: fixed; top: 70px; right: 28px; z-index: 70; display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.3); }
+.findbar input { width: 260px; max-width: 46vw; }
+.findbar .findcount { min-width: 74px; text-align: right; font-size: 12.5px; white-space: nowrap; }
 .gc .pill { line-height: 1.5; }
 /* a row that was fixed or edited is not faded; only one whose Inventory got unchecked gets a soft tint */
 .gr.invoff .gc:not(.s):not(.a) { background: var(--warn-bg); }

@@ -442,6 +442,13 @@ function skeleton() {
     `<optgroup label="Amazon status">${Object.keys(STATUS).map((k) => `<option ${S.F.queue === k ? "selected" : ""}>${esc(k)}</option>`).join("")}</optgroup>`,
     ...["Listing check", "Michaels sync", "Data quality"].map((g) => `<optgroup label="${g}">${Object.entries(m.queues).filter(([, v]) => v.group === g).map(([k, v]) => `<option value="${k}" ${S.F.queue === k ? "selected" : ""}>${esc(v.label)}</option>`).join("")}</optgroup>`)].join("");
   root.innerHTML = `<div class="sheetpage">
+    <div class="findbar hidden" id="findBar" role="search">
+      <input type="search" id="findIn" placeholder="Find in all rows" aria-label="Find in all rows" autocomplete="off" spellcheck="false">
+      <span class="muted findcount" id="findCount" aria-live="polite"></span>
+      <button class="btn small" id="findPrev" title="Previous match (Shift+Enter)" aria-label="Previous match">↑</button>
+      <button class="btn small" id="findNext" title="Next match (Enter)" aria-label="Next match">↓</button>
+      <button class="btn small" id="findX" title="Close (Esc)" aria-label="Close find">✕</button>
+    </div>
     <div class="toolbar sheetbar">
       <input class="grow" type="search" id="q" placeholder="Search SKU, ASIN, UPC, name…  ( / )" value="${esc(S.F.q)}" aria-label="Search" style="max-width:340px">
       <select id="fQueue" aria-label="Queue">${queueOpts}</select>
@@ -471,7 +478,8 @@ function skeleton() {
     ${["categories", "listing_statuses", "manual_statuses"].map((n) => `<datalist id="dl_${n}">${(m[n] || []).map((x) => `<option value="${esc(x)}">`).join("")}</datalist>`).join("")}
     <datalist id="dl_source"><option value="Amazon"></datalist>
     <datalist id="dl_statuses">${Object.keys(STATUS).map((x) => `<option value="${esc(x)}">`).join("")}</datalist></div>`;
-  el = { scroller: $("#scroller"), inner: $("#inner"), head: $("#ghead"), body: $("#gbody"), fbar: $("#fbar"), stL: $("#stLeft"), stR: $("#stRight") };
+  el = { scroller: $("#scroller"), inner: $("#inner"), head: $("#ghead"), body: $("#gbody"), fbar: $("#fbar"), stL: $("#stLeft"), stR: $("#stRight"),
+    findBar: $("#findBar"), findIn: $("#findIn"), findCount: $("#findCount") };
   fitHeight();
   drawViews();
   wire();
@@ -520,6 +528,7 @@ async function loadView(resetScroll) {
   statusLine();
   drawDraftBar();
   drawClearButton();
+  if (S.find?.open && S.find.term.trim()) runFind(false);          // the rows changed: look again (without jumping)
 }
 
 async function exportView() {                           // POST, so a long filter can't break the request
@@ -590,6 +599,7 @@ function render() {
   if (S.copied && S.copied.n !== S.ids.length) S.copied = null;          // the rows moved: the dashed border no longer points at the right cells
   const cpy = S.copied?.rects;
   const act = S.sel ? { r: S.sel.r2, c: S.sel.c2 } : null;
+  const fnd = S.find?.open && S.find.keys.size ? S.find : null, fcur = fnd?.hits[fnd.at];         // Ctrl+F: the cells that contain the text, and the one we're on
   let html = "";
   for (let i = a; i <= b; i++) {
     const row = rowAt(i);
@@ -601,7 +611,7 @@ function render() {
     cols.forEach((c, ci) => {
       const inSel = inRects(rs, i, ci);
       const isAct = act && act.r === i && act.c === ci;
-      const cls = `gc ${c.r || c.t === "num" || c.t === "money" || c.t === "pct" ? "r" : ""} ${c.t === "bool" ? "ctr" : ""} ${c.pin ? "pin" : ""} ${c.calc ? "calc" : ""} ${blockedMsg(c.k) ? "ro locked" : ""} ${row?._ovr?.includes(c.k) ? "ov" : ""} ${rule && ROW_COLOR_COLS.has(c.k) ? "rcc" : ""} ${S.colors && row && !draft ? cellFlag(row, c) : ""} ${inSel ? "s" : ""} ${isAct ? "a" : ""} ${cpy ? copyEdges(cpy, i, ci) : ""}`;
+      const cls = `gc ${c.r || c.t === "num" || c.t === "money" || c.t === "pct" ? "r" : ""} ${c.t === "bool" ? "ctr" : ""} ${c.pin ? "pin" : ""} ${c.calc ? "calc" : ""} ${blockedMsg(c.k) ? "ro locked" : ""} ${row?._ovr?.includes(c.k) ? "ov" : ""} ${rule && ROW_COLOR_COLS.has(c.k) ? "rcc" : ""} ${S.colors && row && !draft ? cellFlag(row, c) : ""} ${inSel ? "s" : ""} ${isAct ? "a" : ""} ${fnd && fnd.keys.has(i * 4096 + ci) ? (fcur[0] === i && fcur[1] === ci ? "fndcur" : "fnd") : ""} ${cpy ? copyEdges(cpy, i, ci) : ""}`;
       let inner = "";
       if (row) {
         if (c.t === "amzimg") inner = row.amazon_image
@@ -669,6 +679,64 @@ function drawViews() {
   bar.innerHTML = `<span class="muted">Saved views:</span>
     ${S.views.map((v) => `<span class="btnrow" style="gap:0"><button class="btn small" data-view="${v.id}" title="${v.shared ? "Shared by " + esc(v.username) : "Only you"}">${v.shared ? "👥 " : ""}${esc(v.name)}</button>${v.mine || ctx.isAdmin() ? `<button class="btn small danger" data-delview="${v.id}" title="Delete view" aria-label="Delete view ${esc(v.name)}">×</button>` : ""}</span>`).join("") || `<span class="muted">none yet</span>`}
     <button class="btn small" id="saveView">+ Save current filters</button>`;
+}
+
+// ------------------------------------------------------------------ find (Ctrl+F)
+// Like Google Sheets: the bar finds the text in every row of the view (the server searches, so rows that aren't loaded yet are
+// found too), jumps to the first cell at or after the one you're on, and Enter / Shift+Enter go to the next / previous match.
+const findState = () => (S.find ||= { open: false, term: "", hits: [], at: -1, keys: new Set(), seq: 0, truncated: false });
+function drawFindCount() {
+  const f = findState();
+  el.findCount.textContent = !f.term.trim() ? "" : !f.hits.length ? "No results" : `${f.at + 1} of ${fmt(f.hits.length)}${f.truncated ? "+" : ""}`;
+}
+async function runFind(jump) {
+  const f = findState(), term = el.findIn.value, seq = ++f.seq;
+  f.term = term;
+  if (!term.trim()) { f.hits = []; f.at = -1; f.keys = new Set(); f.truncated = false; drawFindCount(); return render(); }
+  let res;
+  try {
+    res = await api("/api/sheet/find", { ...filterParams(), term, cols: visCols().filter((c) => c.t !== "img" && c.t !== "amzimg").map((c) => c.k) });
+  } catch (e) { return toast(e.message, "bad"); }
+  if (seq !== f.seq) return;                                       // a newer search has started
+  const row = new Map(S.ids.map((id, i) => [id, i])), col = new Map(visCols().map((c, i) => [c.k, i])), hits = [];
+  for (const [sku, keys] of res.matches) {
+    const r = row.get(sku);
+    if (r === undefined) continue;                                 // not in this list (for example a work list that only holds some rows)
+    for (const k of keys) if (col.has(k)) hits.push([r, col.get(k)]);
+  }
+  hits.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  f.hits = hits;
+  f.keys = new Set(hits.map(([r, c]) => r * 4096 + c));
+  f.truncated = res.truncated;
+  const from = S.sel ? [S.sel.r2, S.sel.c2] : [0, -1], next = hits.findIndex(([r, c]) => r > from[0] || (r === from[0] && c >= from[1]));
+  f.at = hits.length ? Math.max(0, next) : -1;                      // after the last cell: wrap to the first match
+  drawFindCount();
+  if (jump && hits.length) goHit(f.at); else render();
+}
+function goHit(i) {
+  const f = findState();
+  if (!f.hits.length) return;
+  f.at = (i + f.hits.length) % f.hits.length;
+  const [r, c] = f.hits[f.at], sc = el.scroller, vh = sc.clientHeight - HEADERS_H;
+  if (r * RH < sc.scrollTop || (r + 1) * RH > sc.scrollTop + vh) sc.scrollTop = Math.max(0, r * RH - vh / 2 + RH / 2);       // bring the row to the middle of the screen
+  setSel(r, c, r, c, true);
+  drawFindCount();
+}
+function openFind() {
+  const f = findState();
+  f.open = true;
+  el.findBar.classList.remove("hidden");
+  el.findIn.focus();
+  el.findIn.select();
+  if (el.findIn.value.trim()) runFind(false); else render();
+}
+function closeFind() {
+  const f = findState();
+  f.open = false;
+  f.hits = []; f.keys = new Set(); f.at = -1;
+  el.findBar.classList.add("hidden");
+  render();
+  el.scroller.focus();
 }
 
 // ------------------------------------------------------------------ selection & movement
@@ -1555,6 +1623,10 @@ function wire() {
       const k = e.key.toLowerCase();
       if (k === "z" || k === "y") { e.preventDefault(); undo(k === "y" || e.shiftKey); }
     });
+    document.addEventListener("keydown", (e) => {                  // Ctrl+F opens our find bar instead of the browser's, as in Google Sheets
+      if (!el.scroller?.isConnected || S.edit || document.querySelector("dialog[open]")) return;
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "f") { e.preventDefault(); openFind(); }
+    });
     addEventListener("beforeunload", (e) => {                       // unsaved new rows: ask before the page closes
       if (el.scroller?.isConnected && S?.drafts.some((d) => !draftBlank(d))) { e.preventDefault(); e.returnValue = ""; }
     });
@@ -1582,6 +1654,18 @@ function wire() {
     openRowMenu(e.clientX, e.clientY);
   });
   sc.addEventListener("scroll", () => { requestAnimationFrame(render); closeEditor(true); });
+  el.findIn.addEventListener("input", debounce(() => runFind(true), 250));
+  el.findIn.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); return closeFind(); }
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const f = findState();
+    if (el.findIn.value !== f.term) return runFind(true);           // typed and pressed Enter before the search ran
+    goHit(f.at + (e.shiftKey ? -1 : 1));
+  });
+  $("#findNext").onclick = () => goHit(findState().at + 1);
+  $("#findPrev").onclick = () => goHit(findState().at - 1);
+  $("#findX").onclick = closeFind;
   sc.addEventListener("focus", () => (S.focused = true));
   sc.addEventListener("blur", () => setTimeout(() => (S.focused = el.scroller.contains(document.activeElement)), 0));
 

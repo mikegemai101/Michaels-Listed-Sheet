@@ -218,6 +218,50 @@ def column_values(key: str, q: dict) -> dict:
     return {"values": out, "truncated": len(rows) > 500}
 
 
+# Find (Ctrl+F): which cells of the products in the view contain the text. The grid shows these columns, so these are searched.
+FIND_TEXT = {**CF_TEXT, "run_at": "run_at"}
+FIND_NUM = {**CF_NUM, "sold_2025": "sold_2025", "sold_2026": "sold_2026", "selling": "((source_price+fee)*:mk)"}
+FIND_MONEY = {"source_price", "fee", "cost", "selling", "auto_price", "michaels_price"}      # shown as $12.34
+FIND_LIMIT = 20000
+
+
+def find_cells(q: dict, term: str, cols: list) -> dict:
+    """[[sku, [column keys that contain the term]], ...] for the products matching the view's filters (the page orders them
+    like the grid). Text ignores case; money is matched the way it is shown (12.34 or $12.34); a checkbox column is TRUE/FALSE."""
+    term = str(term or "").strip()[:200]
+    if not term:
+        return {"matches": [], "truncated": False}
+    cust = custom_types()
+    where, binds = _where(q)
+    binds["fterm"] = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    binds["fmoney"] = "%" + term.lstrip("$").strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    like = "LIKE :fterm ESCAPE '\\'"
+    keys, flags = [], []
+    for k in dict.fromkeys(str(c) for c in (cols or [])[:100]):
+        if k in cust:
+            x = f"json_extract(extra, '$.{k}')"
+            sql = (f"(CASE WHEN COALESCE({x},0)<>0 THEN 'TRUE' ELSE 'FALSE' END) {like}" if cust[k] == "checkbox"
+                   else f"COALESCE(CAST({x} AS TEXT),'') {like}")
+        elif k in CF_BOOL:
+            sql = f"(CASE WHEN {CF_BOOL[k]}<>0 THEN 'TRUE' ELSE 'FALSE' END) {like}"
+        elif k in FIND_TEXT:
+            sql = f"COALESCE(CAST({FIND_TEXT[k]} AS TEXT),'') {like}"
+        elif k in FIND_MONEY:
+            sql = f"(CASE WHEN {FIND_NUM[k]} IS NULL THEN '' ELSE printf('%.2f', {FIND_NUM[k]}) END) LIKE :fmoney ESCAPE '\\'"
+        elif k in FIND_NUM:
+            sql = f"COALESCE(CAST({FIND_NUM[k]} AS TEXT),'') {like}"
+        else:
+            continue
+        keys.append(k)
+        flags.append(sql)
+    if not keys:
+        return {"matches": [], "truncated": False}
+    sel = ", ".join(f"({s}) AS f{i}" for i, s in enumerate(flags))
+    rows = conn().execute(f"SELECT sku, {sel} FROM products WHERE {where} AND ({' OR '.join(flags)}) LIMIT {FIND_LIMIT + 1}", binds).fetchall()
+    out = [[r["sku"], [k for i, k in enumerate(keys) if r[f"f{i}"]]] for r in rows[:FIND_LIMIT]]
+    return {"matches": out, "truncated": len(rows) > FIND_LIMIT}
+
+
 def _column_filters(q: dict, where: list, binds: dict) -> None:
     cust = custom_types() if any(k.startswith("cf_x_") for k in q) else {}
     for k, raw in q.items():

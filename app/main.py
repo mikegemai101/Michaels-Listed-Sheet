@@ -387,6 +387,11 @@ def sheet_skus_post(b: dict = Depends(jbody), u=Depends(current_user)):
     return sheet.sku_list(b)
 
 
+@app.post("/api/sheet/find")
+def sheet_find(b: dict = Depends(jbody), u=Depends(current_user)):
+    return catalog.find_cells(b, b.get("term", ""), b.get("cols") or [])
+
+
 @app.post("/api/sheet/values")
 def sheet_values_post(b: dict = Depends(jbody), u=Depends(current_user)):
     return catalog.column_values(str(b.get("col", "")), b)
